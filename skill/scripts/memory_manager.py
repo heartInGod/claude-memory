@@ -214,7 +214,7 @@ def read_transcript(path: str) -> str:
 EXTRACT_PROMPT = """You are analyzing a Claude Code session transcript. Extract the most important and reusable knowledge.
 
 Output ONLY a JSON array. Each object must have:
-- "path": hierarchical path, 2~3 levels, lowercase english, "/" separated, each level 1~2 words
+- "path": hierarchical path, 2~5 levels, lowercase english, "/" separated, each level 1~2 words
   Examples: "flink/deploy/jar-mapping", "github/ssh", "canoe/volume", "python/async/timeout"
 - "content": core knowledge, concise but complete enough to be useful later
 - "importance": "high", "medium", or "low"
@@ -490,7 +490,7 @@ def cmd_recall(args):
 
 CONSOLIDATE_PATH_PROMPT = """Reorganize these memory entries into a tree structure.
 
-Assign each entry a hierarchical path: 2~3 levels, lowercase english, "/" separated, each level 1~2 words.
+Assign each entry a hierarchical path: 2~5 levels, lowercase english, "/" separated, each level 1~2 words.
 
 Rules:
 1. Group entries about the same topic under the SAME path — they will be merged later

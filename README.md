@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- **树状结构**: 记忆按 2~3 层路径组织（如 `flink/deploy/jar-mapping`），自动聚合同主题知识
+- **树状结构**: 记忆按 2~5 层路径组织（如 `flink/deploy/jar-mapping`），自动聚合同主题知识
 - **自动提取**: 会话结束时调用 Claude Sonnet 从对话记录中提取关键知识，感知已有路径避免重复
 - **自动加载**: 新会话开始时以树形格式展示所有活跃记忆，Claude 可直接引用历史知识
 - **智能合并**: 基于路径前缀匹配检测相似条目，自动合并而非重复存储
@@ -53,6 +53,20 @@ bash install.sh
 5. 验证安装
 
 安装后重启 Claude Code 即可生效。
+
+## 升级
+
+```bash
+cd claude-memory
+git pull
+bash upgrade.sh
+```
+
+升级脚本会自动完成：
+
+1. 更新 skill 文件（保留已有记忆数据）
+2. 检测 global_memory 格式版本，v1 自动调用 Sonnet API 迁移为 v2 树状结构
+3. 重置 deep_memory（从新遗忘周期重新生成）
 
 ## 卸载
 
@@ -174,12 +188,13 @@ python3 ~/.claude/skills/claude-memory/scripts/memory_manager.py extract \
 ```
 claude-memory/
 ├── install.sh                       # 一键安装脚本
+├── upgrade.sh                       # 自动升级脚本（数据迁移）
 ├── uninstall.sh                     # 卸载脚本（可选保留数据）
 ├── README.md
 └── skill/
     ├── SKILL.md                     # Claude Code skill 定义
     ├── scripts/
-    │   ├── memory_manager.py        # 核心逻辑（提取/合并/遗忘/加载/搜索）
+    │   ├── memory_manager.py        # 核心逻辑（提取/合并/遗忘/加载/搜索/整合）
     │   ├── session_start.sh         # SessionStart hook
     │   └── session_stop.sh          # Stop hook
     └── data/
