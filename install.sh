@@ -36,6 +36,7 @@ chmod +x "$SKILL_DST/scripts/"*.sh
 # 3. Initialize data files (preserve existing data on reinstall)
 echo "[3/5] Initializing data directory..."
 mkdir -p "$SKILL_DST/data"
+mkdir -p "$SKILL_DST/data/details"
 if [ ! -f "$SKILL_DST/data/global_memory.json" ]; then
     echo '{"version": 1, "entries": []}' > "$SKILL_DST/data/global_memory.json"
     echo "  Created global_memory.json"

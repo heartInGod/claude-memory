@@ -37,10 +37,24 @@ python3 ~/.claude/skills/claude-memory/scripts/memory_manager.py forget
 python3 ~/.claude/skills/claude-memory/scripts/memory_manager.py reactivate --id "mem_xxx"
 ```
 
+### Compact entries (compress long content)
+```bash
+# Preview which entries would be compressed
+python3 ~/.claude/skills/claude-memory/scripts/memory_manager.py compact --dry-run
+
+# Compress all entries over 500 chars (default threshold)
+python3 ~/.claude/skills/claude-memory/scripts/memory_manager.py compact
+
+# Custom threshold
+python3 ~/.claude/skills/claude-memory/scripts/memory_manager.py compact --threshold 800
+```
+
 ## Memory Lifecycle
 
 ```
-New Session → Extract Knowledge → Merge/Deduplicate → Store
+New Session → Extract Knowledge → Merge/Compress (LLM) → Store
+                                       ↓
+                              Content too complex? → Create detail file
                                        ↓
                               Similar in deep_memory? → Reactivate
                                        ↓
@@ -61,3 +75,4 @@ New Session → Extract Knowledge → Merge/Deduplicate → Store
 
 - `~/.claude/skills/claude-memory/data/global_memory.json` — Active memories
 - `~/.claude/skills/claude-memory/data/deep_memory.json` — Forgotten archive (searchable, reactivatable)
+- `~/.claude/skills/claude-memory/data/details/` — Detail files for complex entries (referenced from content)

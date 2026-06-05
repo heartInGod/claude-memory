@@ -27,6 +27,10 @@ MAX_MEMORY_BYTES = 500 * 1024
 TARGET_MEMORY_BYTES = 450 * 1024
 MAX_TRANSCRIPT_CHARS = 80000
 
+DETAIL_DIR = DATA_DIR / "details"
+COMPRESS_CONTENT_THRESHOLD = 500  # chars; compact targets entries above this
+DETAIL_REFERENCE_PATTERN = r'\n\n\U0001F4CE 详细内容: details/(\S+\.md)$'
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -93,14 +97,58 @@ def is_similar(entry_a: dict, entry_b: dict) -> bool:
     return title_sim >= 0.5
 
 
+def parse_content_with_detail(content: str, entry_id: str) -> tuple:
+    match = re.search(DETAIL_REFERENCE_PATTERN, content)
+    if not match:
+        return content, None
+    main_text = content[:match.start()]
+    detail_filename = match.group(1)
+    detail_path = DETAIL_DIR / detail_filename
+    detail_text = None
+    if detail_path.exists():
+        with open(detail_path, "r", encoding="utf-8") as f:
+            detail_text = f.read()
+    return main_text, detail_text
+
+
+def write_detail_file(entry_id: str, detail_content: str) -> str:
+    DETAIL_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{entry_id}.md"
+    with open(DETAIL_DIR / filename, "w", encoding="utf-8") as f:
+        f.write(detail_content)
+    return filename
+
+
+def remove_detail_file(entry_id: str):
+    filepath = DETAIL_DIR / f"{entry_id}.md"
+    if filepath.exists():
+        filepath.unlink()
+
+
 def merge_entries(existing: dict, new_entry: dict) -> dict:
     existing["access_count"] = existing.get("access_count", 1) + 1
     existing["last_accessed"] = now_iso()
 
-    ec = existing.get("content", "")
+    ec_raw = existing.get("content", "")
     nc = new_entry.get("content", "")
-    if len(nc) > len(ec):
-        existing["content"] = nc
+    entry_id = existing.get("id", gen_id())
+    path = existing.get("path", "")
+
+    ec_main, existing_detail = parse_content_with_detail(ec_raw, entry_id)
+
+    if len(ec_main) + len(nc) > 200:
+        result = compress_content(ec_main, nc, path, entry_id, existing_detail)
+        compressed = result["compressed_content"]
+        detail = result["detail_content"]
+        if detail:
+            filename = write_detail_file(entry_id, detail)
+            existing["content"] = compressed + f"\n\n\U0001F4CE 详细内容: details/{filename}"
+        else:
+            remove_detail_file(entry_id)
+            existing["content"] = compressed
+    else:
+        if nc and nc not in ec_raw:
+            existing["content"] = ec_raw + "\n" + nc if ec_raw else nc
 
     imp_order = {"high": 3, "medium": 2, "low": 1}
     ei = imp_order.get(existing.get("importance", "low"), 1)
@@ -170,6 +218,52 @@ def call_sonnet(prompt: str, system: str = "", max_tokens: int = 4096) -> str:
     return ""
 
 
+# ─── Compression ────────────────────────────────────────────
+
+def compress_content(existing_content: str, new_content: str, path: str,
+                     entry_id: str, existing_detail: str = None) -> dict:
+    detail_section = ""
+    if existing_detail:
+        detail_section = f"Existing detail file content:\n---\n{existing_detail}\n---"
+
+    if new_content:
+        content_section = MERGE_CONTENT_SECTION.format(
+            existing_content=existing_content,
+            new_content=new_content,
+            detail_section=detail_section,
+        )
+    else:
+        content_section = COMPACT_CONTENT_SECTION.format(
+            existing_content=existing_content,
+            detail_section=detail_section,
+        )
+
+    prompt = COMPRESS_PROMPT.format(path=path, content_section=content_section)
+    raw = call_sonnet(prompt, system="You compress knowledge entries. Output only valid JSON.")
+
+    if not raw.strip():
+        fallback = existing_content if len(existing_content) >= len(new_content) else new_content
+        return {"compressed_content": fallback, "detail_content": None}
+
+    try:
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            result = json.loads(match.group())
+            compressed = result.get("compressed_content", "")
+            detail = result.get("detail_content")
+            if not compressed.strip():
+                raise ValueError("Empty compressed_content")
+            if detail is not None and not detail.strip():
+                detail = None
+            return {"compressed_content": compressed, "detail_content": detail}
+        else:
+            raise ValueError("No JSON object found in response")
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"[claude-memory] Compress parse error: {e}", file=sys.stderr)
+        fallback = existing_content if len(existing_content) >= len(new_content) else new_content
+        return {"compressed_content": fallback, "detail_content": None}
+
+
 # ─── Extract ─────────────────────────────────────────────────
 
 def read_transcript(path: str) -> str:
@@ -233,6 +327,57 @@ Transcript:
 ---
 {transcript}
 ---"""
+
+
+COMPRESS_PROMPT = """You are compressing AI memory entries. These entries are loaded into AI context at session start, so compact size matters.
+
+Memory path: {path}
+
+{content_section}
+
+## Compression Rules
+
+1. **Generalize**: Extract universal patterns, methods, and rules. Remove incident-specific narratives (dates, one-time errors, specific IDs) while keeping their conclusions and lessons learned.
+2. **Preserve conclusions**: Key findings, best practices, decisions, and results MUST survive compression. If a specific incident led to a reusable principle, keep the principle, drop the incident story.
+3. **Extract skills**: State reusable methods/techniques/workflows as actionable instructions (imperative form), not as historical descriptions.
+4. **Keep reference data**: Preserve ALL URLs, file paths, credentials, config values, API endpoints, port numbers, hostnames. These are lookup data that cannot be reconstructed.
+5. **Language**: Match the dominant language of the input (Chinese or English). Do not translate.
+
+## Detail File Decision
+
+If the content has important but rarely-needed information (step-by-step procedures, specific diagnostic examples, full config templates, exhaustive lists) that would be lost in compression:
+- Put a self-sufficient summary in `compressed_content` (aim for < 500 chars)
+- Put the detailed reference material in `detail_content` as markdown
+
+If the content is already concise (< 400 chars) or can be fully captured in < 500 chars, set `detail_content` to null.
+
+## Output Format
+
+Output ONLY a valid JSON object, no other text:
+{{"compressed_content": "Compact, generic knowledge. Must be useful on its own without the detail file.", "detail_content": "Detailed markdown for reference, or null if not needed."}}"""
+
+MERGE_CONTENT_SECTION = """Existing content:
+---
+{existing_content}
+---
+
+New content to merge in:
+---
+{new_content}
+---
+
+{detail_section}
+
+Merge these into one compressed entry. Combine overlapping information; keep the union of non-overlapping facts."""
+
+COMPACT_CONTENT_SECTION = """Current content:
+---
+{existing_content}
+---
+
+{detail_section}
+
+Compress this single entry to be more compact and generic."""
 
 
 def cmd_extract(args):
@@ -769,6 +914,72 @@ def cmd_stats(args):
             print(f"  [score:{score:.2f}] {entry_path(e)}")
 
 
+# ─── Compact ────────────────────────────────────────────────
+
+def cmd_compact(args):
+    threshold = getattr(args, 'threshold', COMPRESS_CONTENT_THRESHOLD)
+    dry_run = getattr(args, 'dry_run', False)
+
+    global_mem = load_json(GLOBAL_MEMORY_FILE)
+    entries = global_mem.get("entries", [])
+
+    candidates = [e for e in entries if len(e.get("content", "")) > threshold]
+
+    if not candidates:
+        print(f"[claude-memory] No entries above {threshold} chars. Nothing to compact.", file=sys.stderr)
+        return
+
+    print(f"[claude-memory] Found {len(candidates)} entries above {threshold} chars.", file=sys.stderr)
+
+    if dry_run:
+        for entry in candidates:
+            c = entry.get("content", "")
+            print(f"  {len(c):5d} chars | {entry.get('path', '?')} | {entry.get('id', '?')}")
+        return
+
+    compacted = 0
+    detail_files_created = 0
+    total_before = 0
+    total_after = 0
+
+    for entry in candidates:
+        entry_id = entry.get("id", gen_id())
+        path = entry.get("path", "")
+        content_raw = entry.get("content", "")
+        total_before += len(content_raw)
+
+        main_content, existing_detail = parse_content_with_detail(content_raw, entry_id)
+
+        print(f"  Compacting: {path} ({len(content_raw)} chars)...", file=sys.stderr)
+
+        result = compress_content(main_content, "", path, entry_id, existing_detail)
+        compressed = result["compressed_content"]
+        detail = result["detail_content"]
+
+        if detail:
+            filename = write_detail_file(entry_id, detail)
+            entry["content"] = compressed + f"\n\n\U0001F4CE 详细内容: details/{filename}"
+            detail_files_created += 1
+        else:
+            remove_detail_file(entry_id)
+            entry["content"] = compressed
+
+        total_after += len(entry["content"])
+        compacted += 1
+
+    save_json(GLOBAL_MEMORY_FILE, global_mem)
+
+    size_kb = get_json_size(global_mem) / 1024
+    reduction = 100 - total_after * 100 // total_before if total_before > 0 else 0
+    print(
+        f"[claude-memory] Compact done: {compacted} entries compressed, "
+        f"{detail_files_created} detail files created. "
+        f"Content: {total_before} -> {total_after} chars ({reduction}% reduction). "
+        f"Global: {len(entries)} entries ({size_kb:.1f}KB)",
+        file=sys.stderr,
+    )
+
+
 # ─── Main ────────────────────────────────────────────────────
 
 def main():
@@ -789,6 +1000,10 @@ def main():
     p_react = sub.add_parser("reactivate")
     p_react.add_argument("--id", required=True)
 
+    p_compact = sub.add_parser("compact")
+    p_compact.add_argument("--threshold", type=int, default=COMPRESS_CONTENT_THRESHOLD)
+    p_compact.add_argument("--dry-run", action="store_true")
+
     p_consolidate = sub.add_parser("consolidate")
     p_consolidate.add_argument("--dry-run", action="store_true")
 
@@ -800,6 +1015,7 @@ def main():
         "stats": cmd_stats,
         "recall": cmd_recall,
         "reactivate": cmd_reactivate,
+        "compact": cmd_compact,
         "consolidate": cmd_consolidate,
     }
 
